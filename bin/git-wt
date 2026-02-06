@@ -1,0 +1,269 @@
+#!/bin/bash
+# git-wt - Share untracked files across git worktrees via symlinks.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+COMMON_DIR="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd)" || {
+	echo "Error: not inside a git repository" >&2
+	exit 1
+}
+SHARED_DIR="$COMMON_DIR/wt-shared"
+MANIFEST="$SHARED_DIR/.manifest"
+
+ensure_setup() {
+	mkdir -p "$SHARED_DIR"
+	touch "$MANIFEST"
+}
+
+get_worktrees() {
+	git worktree list --porcelain | awk '/^worktree /{print substr($0,10)}'
+}
+
+sync_worktree() {
+	local wt_dir="$1"
+	local changed=false
+	while IFS= read -r entry; do
+		[ -z "$entry" ] && continue
+		local target="$SHARED_DIR/$entry"
+		local link="$wt_dir/$entry"
+		[ ! -e "$target" ] && continue
+		if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+			continue
+		fi
+		if [ -e "$link" ] && [ ! -L "$link" ]; then
+			mv "$link" "$link.wt-backup"
+			echo "  Backed up $link -> $link.wt-backup"
+		fi
+		[ -L "$link" ] && rm "$link"
+		mkdir -p "$(dirname "$link")"
+		ln -s "$target" "$link"
+		changed=true
+	done <"$MANIFEST"
+	$changed
+}
+
+cmd_add() {
+	local file="$1"
+	local wt_root
+	wt_root="$(git rev-parse --show-toplevel)"
+
+	ensure_setup
+
+	if grep -qxF "$file" "$MANIFEST" 2>/dev/null; then
+		echo "Already tracked: $file"
+		cmd_sync
+		return 0
+	fi
+
+	if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+		echo "Error: $file is tracked by git — only untracked files can be shared" >&2
+		return 1
+	fi
+
+	local src="$wt_root/$file"
+	if [ -L "$src" ]; then
+		echo "Error: $file is already a symlink" >&2
+		return 1
+	fi
+	if [ ! -e "$src" ]; then
+		echo "Error: $file does not exist in $wt_root" >&2
+		return 1
+	fi
+
+	mkdir -p "$(dirname "$SHARED_DIR/$file")"
+	mv "$src" "$SHARED_DIR/$file"
+	echo "Moved $file to shared storage"
+
+	echo "$file" >>"$MANIFEST"
+	echo "Tracking: $file"
+
+	cmd_sync
+}
+
+cmd_rm() {
+	local file="$1"
+	local wt_root
+	wt_root="$(git rev-parse --show-toplevel)"
+
+	ensure_setup
+
+	if ! grep -qxF "$file" "$MANIFEST" 2>/dev/null; then
+		echo "Not tracked: $file" >&2
+		return 1
+	fi
+
+	for wt_dir in $(get_worktrees); do
+		local link="$wt_dir/$file"
+		[ -L "$link" ] && rm "$link"
+	done
+
+	if [ -e "$SHARED_DIR/$file" ]; then
+		mkdir -p "$(dirname "$wt_root/$file")"
+		mv "$SHARED_DIR/$file" "$wt_root/$file"
+		echo "Restored $file to $wt_root"
+	fi
+
+	grep -vxF "$file" "$MANIFEST" >"$MANIFEST.tmp" || true
+	mv "$MANIFEST.tmp" "$MANIFEST"
+
+	echo "Untracked: $file"
+}
+
+cmd_sync() {
+	ensure_setup
+	if [ ! -s "$MANIFEST" ]; then
+		echo "Nothing to sync (no tracked files)"
+		return 0
+	fi
+	local count=0
+	for wt_dir in $(get_worktrees); do
+		if sync_worktree "$wt_dir"; then
+			echo "  Synced $(basename "$wt_dir")"
+			count=$((count + 1))
+		fi
+	done
+	if [ "$count" -eq 0 ]; then
+		echo "All worktrees up to date"
+	else
+		echo "Synced $count worktree(s)"
+	fi
+}
+
+cmd_list() {
+	ensure_setup
+	if [ -s "$MANIFEST" ]; then
+		cat "$MANIFEST"
+	else
+		echo "No tracked files"
+	fi
+}
+
+cmd_status() {
+	ensure_setup
+	if [ ! -s "$MANIFEST" ]; then
+		echo "No tracked files"
+		return 0
+	fi
+	local entries
+	mapfile -t entries <"$MANIFEST"
+	for wt_dir in $(get_worktrees); do
+		echo "$(basename "$wt_dir"):"
+		for entry in "${entries[@]}"; do
+			[ -z "$entry" ] && continue
+			local link="$wt_dir/$entry"
+			if [ -L "$link" ]; then
+				echo "  ok  $entry"
+			elif [ -e "$link" ]; then
+				echo "  !!  $entry (real file, not symlinked)"
+			else
+				echo "  --  $entry (missing)"
+			fi
+		done
+	done
+}
+
+cmd_hook() {
+	local action="${1:-}"
+	local hook_dir="$COMMON_DIR/hooks"
+	local hook_file="$hook_dir/post-checkout"
+
+	local snippet
+	snippet=$(
+		cat <<'HOOK'
+
+# git-wt: auto-sync shared files into new worktrees
+if [ "$1" = "0000000000000000000000000000000000000000" ]; then
+    command -v git-wt >/dev/null 2>&1 && git wt sync
+fi
+HOOK
+	)
+
+	case "$action" in
+	install)
+		mkdir -p "$hook_dir"
+		if [ -f "$hook_file" ] && grep -q "git-wt" "$hook_file"; then
+			echo "Hook already installed in $hook_file"
+			return 0
+		fi
+		if [ -f "$hook_file" ]; then
+			echo "$snippet" >>"$hook_file"
+		else
+			printf '#!/bin/bash\n%s\n' "$snippet" >"$hook_file"
+			chmod +x "$hook_file"
+		fi
+		echo "Installed post-checkout hook in $hook_file"
+		;;
+	uninstall)
+		if [ ! -f "$hook_file" ]; then
+			echo "No post-checkout hook found"
+			return 0
+		fi
+		# Remove the git-wt block
+		sed -i '/# git-wt: auto-sync/,/^fi$/d' "$hook_file"
+		echo "Removed git-wt hook from $hook_file"
+		;;
+	*)
+		echo "Usage: git wt hook install|uninstall" >&2
+		return 1
+		;;
+	esac
+}
+
+case "${1:-help}" in
+add | track)
+	[ -z "${2:-}" ] && {
+		echo "Usage: git wt add <file>"
+		exit 1
+	}
+	cmd_add "$2"
+	;;
+rm | untrack)
+	[ -z "${2:-}" ] && {
+		echo "Usage: git wt rm <file>"
+		exit 1
+	}
+	cmd_rm "$2"
+	;;
+sync)
+	cmd_sync
+	;;
+list | ls)
+	cmd_list
+	;;
+status | st)
+	cmd_status
+	;;
+hook)
+	cmd_hook "${2:-}"
+	;;
+--version | -v)
+	echo "git-wt $VERSION"
+	;;
+help | --help | -h)
+	cat <<'HELP'
+Usage: git wt <command> [args]
+
+Share untracked files across all git worktrees via symlinks.
+Files are stored centrally in .git/wt-shared/ and symlinked into each worktree.
+
+Commands:
+  add <file>        Move file to shared storage, symlink into all worktrees
+  rm <file>         Stop sharing, restore real file to current worktree
+  sync              Re-sync symlinks across all worktrees
+  list              List tracked files
+  status            Show symlink health across all worktrees
+  hook install      Install post-checkout hook for automatic sync
+  hook uninstall    Remove the post-checkout hook
+
+Options:
+  --version         Show version
+  --help            Show this help
+HELP
+	;;
+*)
+	echo "Unknown command: $1 (try 'git wt help')" >&2
+	exit 1
+	;;
+esac
