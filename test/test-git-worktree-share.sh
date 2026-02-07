@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GIT_WT="$SCRIPT_DIR/../bin/git-wt"
+GIT_WT="$SCRIPT_DIR/../bin/git-worktree-share"
 TMPDIR_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
@@ -128,8 +128,8 @@ echo "local-copy" >"$dir/wt1/conflict"
 "$GIT_WT" add conflict >/dev/null
 
 assert_symlink "wt1/conflict is now symlink" "$dir/wt1/conflict"
-assert_file_exists "backup created" "$dir/wt1/conflict.wt-backup"
-assert_eq "backup has old content" "local-copy" "$(cat "$dir/wt1/conflict.wt-backup")"
+assert_file_exists "backup created" "$dir/wt1/conflict.shared-backup"
+assert_eq "backup has old content" "local-copy" "$(cat "$dir/wt1/conflict.shared-backup")"
 
 echo "test: sync is idempotent"
 dir="$(setup)"
@@ -145,16 +145,16 @@ cd "$dir/main"
 "$GIT_WT" hook install >/dev/null
 common="$(git rev-parse --git-common-dir)"
 assert_file_exists "hook file created" "$common/hooks/post-checkout"
-if grep -q "git-wt" "$common/hooks/post-checkout"; then
-	echo "  PASS: hook contains git-wt"
+if grep -q "git-worktree-share" "$common/hooks/post-checkout"; then
+	echo "  PASS: hook contains git-worktree-share"
 	pass=$((pass + 1))
 else
-	echo "  FAIL: hook missing git-wt"
+	echo "  FAIL: hook missing git-worktree-share"
 	fail=$((fail + 1))
 fi
 # Install again should be idempotent
 output="$("$GIT_WT" hook install)"
-count=$(grep -c "git wt sync" "$common/hooks/post-checkout")
+count=$(grep -c "git worktree-share sync" "$common/hooks/post-checkout")
 assert_eq "hook not duplicated" "1" "$count"
 
 echo "test: add rejects git-tracked files"

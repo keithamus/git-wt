@@ -1,5 +1,5 @@
 #!/bin/bash
-# git-wt - Share untracked files across git worktrees via symlinks.
+# git-worktree-share - Share untracked files across git worktrees via symlinks.
 
 set -euo pipefail
 
@@ -9,7 +9,7 @@ COMMON_DIR="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd)" || {
 	echo "Error: not inside a git repository" >&2
 	exit 1
 }
-SHARED_DIR="$COMMON_DIR/wt-shared"
+SHARED_DIR="$COMMON_DIR/shared"
 MANIFEST="$SHARED_DIR/.manifest"
 
 ensure_setup() {
@@ -33,8 +33,8 @@ sync_worktree() {
 			continue
 		fi
 		if [ -e "$link" ] && [ ! -L "$link" ]; then
-			mv "$link" "$link.wt-backup"
-			echo "  Backed up $link -> $link.wt-backup"
+			mv "$link" "$link.shared-backup"
+			echo "  Backed up $link -> $link.shared-backup"
 		fi
 		[ -L "$link" ] && rm "$link"
 		mkdir -p "$(dirname "$link")"
@@ -173,9 +173,9 @@ cmd_hook() {
 	snippet=$(
 		cat <<'HOOK'
 
-# git-wt: auto-sync shared files into new worktrees
+# git-worktree-share: auto-sync shared files into new worktrees
 if [ "$1" = "0000000000000000000000000000000000000000" ]; then
-    command -v git-wt >/dev/null 2>&1 && git wt sync
+    command -v git-worktree-share >/dev/null 2>&1 && git worktree-share sync
 fi
 HOOK
 	)
@@ -183,7 +183,7 @@ HOOK
 	case "$action" in
 	install)
 		mkdir -p "$hook_dir"
-		if [ -f "$hook_file" ] && grep -q "git-wt" "$hook_file"; then
+		if [ -f "$hook_file" ] && grep -q "git-worktree-share" "$hook_file"; then
 			echo "Hook already installed in $hook_file"
 			return 0
 		fi
@@ -200,12 +200,12 @@ HOOK
 			echo "No post-checkout hook found"
 			return 0
 		fi
-		# Remove the git-wt block
-		sed -i '/# git-wt: auto-sync/,/^fi$/d' "$hook_file"
-		echo "Removed git-wt hook from $hook_file"
+		# Remove the git-worktree-share block
+		sed -i '/# git-worktree-share: auto-sync/,/^fi$/d' "$hook_file"
+		echo "Removed git-worktree-share hook from $hook_file"
 		;;
 	*)
-		echo "Usage: git wt hook install|uninstall" >&2
+		echo "Usage: git worktree-share hook install|uninstall" >&2
 		return 1
 		;;
 	esac
@@ -214,14 +214,14 @@ HOOK
 case "${1:-help}" in
 add | track)
 	[ -z "${2:-}" ] && {
-		echo "Usage: git wt add <file>"
+		echo "Usage: git worktree-share add <file>"
 		exit 1
 	}
 	cmd_add "$2"
 	;;
 rm | untrack)
 	[ -z "${2:-}" ] && {
-		echo "Usage: git wt rm <file>"
+		echo "Usage: git worktree-share rm <file>"
 		exit 1
 	}
 	cmd_rm "$2"
@@ -239,14 +239,14 @@ hook)
 	cmd_hook "${2:-}"
 	;;
 --version | -v)
-	echo "git-wt $VERSION"
+	echo "git-worktree-share $VERSION"
 	;;
 help | --help | -h)
 	cat <<'HELP'
-Usage: git wt <command> [args]
+Usage: git worktree-share <command> [args]
 
 Share untracked files across all git worktrees via symlinks.
-Files are stored centrally in .git/wt-shared/ and symlinked into each worktree.
+Files are stored centrally in .git/shared/ and symlinked into each worktree.
 
 Commands:
   add <file>        Move file to shared storage, symlink into all worktrees
@@ -263,7 +263,7 @@ Options:
 HELP
 	;;
 *)
-	echo "Unknown command: $1 (try 'git wt help')" >&2
+	echo "Unknown command: $1 (try 'git worktree-share help')" >&2
 	exit 1
 	;;
 esac
