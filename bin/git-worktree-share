@@ -18,7 +18,30 @@ ensure_setup() {
 }
 
 get_worktrees() {
-	git worktree list --porcelain | awk '/^worktree /{print substr($0,10)}'
+	# Parse porcelain output and skip worktrees marked as 'bare'
+	git worktree list --porcelain | {
+		path=""
+		skip=0
+		while IFS= read -r line; do
+			# blank line: end of entry
+			[ -z "$line" ] && {
+				[ -n "$path" ] && [ "$skip" -eq 0 ] && echo "$path"
+				path=""
+				skip=0
+				continue
+			}
+			case "$line" in
+				worktree\ *)
+					path="${line#worktree }"
+					;;
+				bare)
+					skip=1
+					;;
+			esac
+		done
+		# print last entry if any
+		[ -n "$path" ] && [ "$skip" -eq 0 ] && echo "$path"
+	}
 }
 
 sync_worktree() {
